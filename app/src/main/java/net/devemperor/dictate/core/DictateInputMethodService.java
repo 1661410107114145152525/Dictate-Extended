@@ -1718,7 +1718,7 @@ public class DictateInputMethodService extends InputMethodService {
             return response.asDiarized().text();
         }
         Log.w("DictateInputMethodService", "Unknown transcription response type: " + response);
-        throw new RuntimeException("Server returned an unrecognized transcription response format");
+        throw new RuntimeException("Server returned an unrecognized transcription response format: " + response);
     }
 
     private String requestRewordingFromApi(String prompt) {
