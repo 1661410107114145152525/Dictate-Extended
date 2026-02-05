@@ -65,8 +65,8 @@ import com.google.android.material.button.MaterialButton;
 import com.google.firebase.crashlytics.FirebaseCrashlytics;
 import com.openai.client.okhttp.OpenAIOkHttpClient;
 import com.openai.models.audio.AudioResponseFormat;
-import com.openai.models.audio.transcriptions.Transcription;
 import com.openai.models.audio.transcriptions.TranscriptionCreateParams;
+import com.openai.models.audio.transcriptions.TranscriptionCreateResponse;
 import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
 
@@ -1513,11 +1513,12 @@ public class DictateInputMethodService extends InputMethodService {
                 }
                 Log.d("DictateKeyboardSerice", "Style-Prompt: " + stylePrompt);
 
-                Transcription transcription;
+                String resultText;
                 int retryCount = 0;
                 while (true) {
                     try {
-                        transcription = clientBuilder.build().audio().transcriptions().create(transcriptionBuilder.build()).asTranscription();
+                        TranscriptionCreateResponse response = clientBuilder.build().audio().transcriptions().create(transcriptionBuilder.build());
+                        resultText = extractTranscriptionText(response);
                         break;
                     } catch (RuntimeException e) {
                         String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
@@ -1526,13 +1527,14 @@ public class DictateInputMethodService extends InputMethodService {
 
                         if (isRetryable && retryCount < 3) {
                             retryCount++;
+                            Log.w("DictateInputMethodService", "Transcription attempt " + retryCount + " failed, retrying...", e);
                             try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
                         } else {
                             throw e;
                         }
                     }
                 }
-                String resultText = transcription.text().strip();  // Groq sometimes adds leading whitespace
+                resultText = resultText.strip();  // Groq sometimes adds leading whitespace
                 resultText = applyAutoFormattingIfEnabled(resultText);
 
                 usageDb.edit(transcriptionModel, DictateUtils.getAudioDuration(audioFile), 0, 0, transcriptionProvider);
@@ -1570,6 +1572,7 @@ public class DictateInputMethodService extends InputMethodService {
 
             } catch (RuntimeException e) {
                 if (!(e.getCause() instanceof InterruptedIOException)) {
+                    Log.e("DictateInputMethodService", "Transcription API request failed", e);
                     sendLogToCrashlytics(e);
                     if (vibrationEnabled) vibrator.vibrate(VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE));
                     mainHandler.post(() -> {
@@ -1588,6 +1591,7 @@ public class DictateInputMethodService extends InputMethodService {
                         }
                     });
                 } else if (e.getCause().getMessage() != null && (e.getCause().getMessage().contains("timeout") || e.getCause().getMessage().contains("failed to connect"))) {
+                    Log.e("DictateInputMethodService", "Transcription request timeout/connection failure", e);
                     sendLogToCrashlytics(e);
                     if (vibrationEnabled) vibrator.vibrate(VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE));
                     mainHandler.post(() -> {
@@ -1700,6 +1704,23 @@ public class DictateInputMethodService extends InputMethodService {
         });
     }
 
+    /**
+     * Extracts the transcribed text from any response variant returned by the API.
+     * Third-party OpenAI-compatible servers may return verbose JSON (with duration, language,
+     * segments) instead of the simple format. This method handles all variants gracefully.
+     */
+    private String extractTranscriptionText(TranscriptionCreateResponse response) {
+        if (response.isTranscription()) {
+            return response.asTranscription().text();
+        } else if (response.isVerbose()) {
+            return response.asVerbose().text();
+        } else if (response.isDiarized()) {
+            return response.asDiarized().text();
+        }
+        Log.w("DictateInputMethodService", "Unknown transcription response type: " + response);
+        throw new RuntimeException("Server returned an unrecognized transcription response format");
+    }
+
     private String requestRewordingFromApi(String prompt) {
         if (sp == null) throw new IllegalStateException("Preferences unavailable");
 
@@ -1766,6 +1787,7 @@ public class DictateInputMethodService extends InputMethodService {
 
                 if (isRetryable && retryCount < 3) {
                     retryCount++;
+                    Log.w("DictateInputMethodService", "Rewording attempt " + retryCount + " failed, retrying...", e);
                     try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
                 } else {
                     throw e;
